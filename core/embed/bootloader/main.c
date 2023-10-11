@@ -48,7 +48,9 @@
 
 #include "ble.h"
 #include "bootui.h"
+#include "camera.h"
 #include "device.h"
+#include "i2c.h"
 #include "messages.h"
 #include "mpu.h"
 #include "spi.h"
@@ -62,6 +64,9 @@
 #endif
 
 #include "emmc_wrapper.h"
+#include "fp_sensor_wrapper.h"
+#include "nfc.h"
+
 const uint8_t BOOTLOADER_KEY_M = 4;
 const uint8_t BOOTLOADER_KEY_N = 7;
 const uint8_t * const BOOTLOADER_KEYS[] = {
@@ -80,7 +85,166 @@ const uint8_t * const BOOTLOADER_KEYS[] = {
 
 #define USB_IFACE_NUM 0
 
+#if !PRODUCTION
 
+
+static void camera_test() {
+  display_printf("TouchPro Demo Mode\n");
+  display_printf("======================\n\n");
+  display_printf("GC2145 Init...");
+  dbgprintf_Wait("%d, %s", __LINE__, (camera_init()==0) ? "success" : "fail");
+
+  unsigned int tcnt = 0;
+  unsigned short* tbuf = (unsigned short*)0xD0200000;
+  for (tcnt = 0; tcnt < (480 * 800); tcnt++) *(tbuf + tcnt) = COLOR_BLACK;
+  dma2d_copy_buffer((uint32_t*)tbuf, (uint32_t*)DISPLAY_MEMORY_BASE, 0, 0, 480,
+                    800);
+  dbgprintf_Wait("%d", __LINE__);
+  if (camera_is_online()) {
+    display_printf("GC2145 Online @ 0x%x  ID: 0x%x\n", GC2145_ADDR,
+                   camera_get_id());
+  } else
+    display_printf("GC2145 Offline!\n");
+  display_printf("\nOutput: %d x %d", WIN_W, WIN_H);
+
+  unsigned char camera_err = 0;
+
+  unsigned short CameraFrameCnt_last = 0;
+
+#define SHOW_PRINT_FPS 0
+#if SHOW_PRINT_FPS
+  unsigned int time_tick = 0;
+  unsigned char fps;
+  unsigned short CFC_last = 0;
+#endif
+  while (1) {
+#if SHOW_PRINT_FPS
+    if ((HAL_GetTick() - time_tick) > 900) {
+      fps = CameraFrameCnt - CFC_last;
+      CFC_last = CameraFrameCnt;
+      time_tick = HAL_GetTick();
+      display_printf("Frame= %d\n", fps);
+      HAL_Delay(100);
+    }
+#endif
+    if (CameraFrameCnt != CameraFrameCnt_last) {
+      dma2d_copy_buffer((uint32_t*)cam_buf, (uint32_t*)DISPLAY_MEMORY_BASE, 0,
+                        320, WIN_W, WIN_H);
+      CameraFrameCnt_last = CameraFrameCnt;
+    }
+    if ((camera_err == 0) && ((unsigned short)dcmi_get_error())) {
+      camera_err = 1;
+      display_printf("\nstate=%d  err=%d\n", dcmi_get_state(),
+                     (unsigned short)dcmi_get_error());
+      fb_fill_rect(15, 762, 150, 21, COLOR_RED);
+      display_text(15, 780, "camera err!", 11, FONT_NORMAL, COLOR_WHITE,
+                   COLOR_RED);
+    }
+  }
+}
+
+static void nfc_test()
+{
+  display_printf("TouchPro Demo Mode\n");\
+  display_printf("======================\n\n");
+  display_printf("NFC PN532 Init...");
+  if(nfc_init())display_printf("ERR\n");
+  else display_printf("OK\n");
+  unsigned char buff[4];
+  if(PN532_GetFirmwareVersion(&pn532, buff)<0){
+    display_printf("NFC PN532 FirmwareVersion Error!\n");
+  }else{
+    display_printf("Found PN532 with firmware v%d.%d\n", buff[1], buff[2]);
+    display_printf("PN532 IC:  0x%x\n",buff[0]);
+  }
+  PN532_SamConfiguration(&pn532);
+  display_printf("Waiting for RFID/NFC card...\r\n");
+  unsigned int uid_len;
+  unsigned char uid[MIFARE_UID_MAX_LENGTH];
+    while (1){
+          uid_len = PN532_ReadPassiveTarget(&pn532, uid, PN532_MIFARE_ISO14443A, 1000);
+    if (uid_len == PN532_STATUS_ERROR) {
+      display_printf(".");
+    } else {
+      display_printf("Found card with UID: ");
+      for (uint8_t i = 0; i < uid_len; i++) {
+        display_printf("%02x ", uid[i]);
+      }
+      display_printf("\r\n");
+    }
+    }
+}
+
+// static void fp_display_image(uint8_t *pu8ImageBuf)
+// {
+// }
+
+static void fp_test()
+{
+    display_printf("TouchPro Demo Mode\n");
+    display_printf("======================\n\n");
+    char fpver[32];
+    FpLibVersion(fpver);
+    display_printf("FP Lib - %s\n", fpver);
+    display_printf("FP Init...");
+
+    ExecuteCheck_ADV_FP(fpsensor_gpio_init(), FPSENSOR_OK, { dbgprintf_Wait("err=%d", FP_ret); });
+    ExecuteCheck_ADV_FP(fpsensor_spi_init(), FPSENSOR_OK, { dbgprintf_Wait("err=%d", FP_ret); });
+    ExecuteCheck_ADV_FP(fpsensor_hard_reset(), FPSENSOR_OK, { dbgprintf_Wait("err=%d", FP_ret); });
+    ExecuteCheck_ADV_FP(fpsensor_init(), FPSENSOR_OK, { dbgprintf_Wait("err=%d", FP_ret); });
+    ExecuteCheck_ADV_FP(fpsensor_adc_init(12, 12, 16, 3), FPSENSOR_OK, { dbgprintf_Wait("err=%d", FP_ret); });
+    ExecuteCheck_ADV_FP(fpsensor_set_config_param(0xC0, 8), FPSENSOR_OK, {
+        dbgprintf_Wait("err=%d", FP_ret);
+    });
+    ExecuteCheck_ADV_FP(FpAlgorithmInit(TEMPLATE_ADDR_START), FPSENSOR_OK, {
+        dbgprintf_Wait("err=%d", FP_ret);
+    });
+
+    display_printf("done\n");
+
+    uint8_t image_data[88 * 112 + 2];
+    memzero(image_data, sizeof(image_data));
+    uint32_t wrote_bytes = 0;
+
+    while ( wrote_bytes == 0 )
+    {
+        if ( FpsDetectFinger() == 1 )
+        {
+            display_printf("finger detected\n");
+
+            switch ( FpsGetImageData(image_data) )
+            {
+            case 0:
+                if ( emmc_fs_file_write(
+                         "0:imagedata.bin", 0, image_data, 88 * 112 + 2, &wrote_bytes, true, false
+                     ) )
+                {
+                    display_printf("image write success\n");
+                }
+                else
+                {
+                    display_printf("image write fail\n");
+                }
+                break;
+            case 1:
+                display_printf("no fingerprint\n");
+                break;
+            case 2:
+                display_printf("fingerprint too small\n");
+                break;
+            default:
+                display_printf("unknow error\n");
+                break;
+            }
+        }
+
+        fpsensor_delay_ms(100);
+    }
+
+    dbgprintf("wrote %lu bytes", wrote_bytes);
+    dbgprintf_Wait("fp_test exiting...");
+}
+#endif
 // this is mainly for ignore/supress faults during flash read (for check
 // purpose). if bus fault enabled, it will catched by BusFault_Handler, then we
 // could ignore it. if bus fault disabled, it will elevate to hard fault, this is
@@ -123,7 +287,7 @@ void BusFault_Handler(void) {
       // try to fix ecc error and reboot
       if (flash_fix_ecc_fault_FIRMWARE(SCB->BFAR)) {
         error_shutdown("Internal flash ECC error", "Cleanup successful",
-                       "Firmware reinstall required",
+                       "Firmware reinstall may required",
                        "If the issue persists, contact support.");
       } else {
         error_shutdown("Internal error", "Cleanup failed",
@@ -319,7 +483,7 @@ static secbool bootloader_usb_loop(const vendor_header* const vhdr,
           hal_delay(1000);
           usb_stop();
           usb_deinit();
-          ui_fadeout();
+          display_clear();
           return sectrue;  // jump to firmware
         }
         break;
@@ -571,6 +735,34 @@ int main(void) {
 #endif
 
   bus_fault_enable();
+
+  qspi_flash_init();
+  qspi_flash_config();
+  qspi_flash_memory_mapped();
+
+  ensure_emmcfs(emmc_fs_init(), "emmc_fs_init");
+  ensure_emmcfs(emmc_fs_mount(true, false), "emmc_fs_mount");
+
+#if !PRODUCTION
+  // write_dev_dummy_config();
+  // serial_set = device_serial_set();
+  // UNUSED(write_dev_dummy_config);
+
+  // char fp_ver[8];
+  // FpAlgorithmLibVer(fp_ver);
+  // dbgprintf_Wait("fp_ver=%s", fp_ver);
+  // dbgprintf_Wait("throw back -> %08X", compile_test(TEST_MAGIC_A));
+
+  // camera_test();
+  UNUSED(camera_test);
+
+  // nfc_test();
+  UNUSED(nfc_test);
+
+  // fp_test();
+  UNUSED(fp_test);
+#endif
+
   device_test();
 
 #if PRODUCTION
@@ -597,20 +789,13 @@ int main(void) {
   device_burnin_test();
 #endif
 
-  qspi_flash_init();
-  qspi_flash_config();
-  qspi_flash_memory_mapped();
-
   mpu_config_bootloader();
 
 #if PRODUCTION
   check_bootloader_version();
 #endif
 
-  ensure_emmcfs(emmc_fs_init(), "emmc_fs_init");
-  ensure_emmcfs(emmc_fs_mount(true, false), "emmc_fs_mount");
 
-  buzzer_init();
   motor_init();
   spi_slave_init();
 
